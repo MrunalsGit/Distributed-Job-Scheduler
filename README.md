@@ -16,14 +16,13 @@ PostgreSQL database.
 
 ## Repo layout
 
-```
-api/          Express REST API — auth, projects, queues, jobs, dashboard reads
-worker/       Polls queues, claims jobs atomically, executes, retries, heartbeats
-scheduler/    Promotes due delayed/cron jobs into real job rows, reaps orphans
-db/           SQL migrations
-dashboard/    React dashboard (queue health, job explorer, workers, DLQ, metrics)
-docs/         Architecture diagram, ER diagram, OpenAPI spec, design decisions
-```
+api/ Express REST API — auth, projects, queues, jobs, dashboard reads
+worker/ Polls queues, claims jobs atomically, executes, retries, heartbeats
+scheduler/ Promotes due delayed/cron jobs into real job rows, reaps orphans
+db/ SQL migrations
+dashboard/ React dashboard (queue health, job explorer, workers, DLQ, metrics)
+docs/ Architecture diagram, ER diagram, OpenAPI spec, design decisions
+
 
 ## Docs
 
@@ -36,33 +35,60 @@ docs/         Architecture diagram, ER diagram, OpenAPI spec, design decisions
 
 ## Setup (local, without Docker)
 
-1. Start Postgres: `docker compose up -d postgres`
+1. Start Postgres: `docker compose up -d postgres` (or run Postgres however you
+   normally would — Docker is only used here for convenience, not required)
 2. Copy env file: `cp .env.example .env` (fill in `JWT_SECRET`)
-3. Run the migration: `npm run migrate`
-4. Install dependencies: `npm install` (installs all workspaces)
-5. Start each process in its own terminal:
-   ```
-   npm run dev:api
-   QUEUE_ID=<a queue id from the DB> npm run dev:worker
-   npm run dev:scheduler
-   ```
-6. Dashboard: `cd dashboard && npm install && npm run dev`, then open
-   http://localhost:5173 and sign up.
+3. **Copy `.env` into each service folder** — `api`, `worker`, and `scheduler`
+   are separate processes, and each loads its own `.env` from its own
+   directory rather than the project root:
+
+cp .env api/.env
+cp .env worker/.env
+cp .env scheduler/.env
+
+4. Run the migration: `npm run migrate`
+5. Install dependencies: `npm install` (installs api, worker, scheduler
+   workspaces together)
+6. Start the API and scheduler, each in its own terminal:
+
+npm run dev:api
+npm run dev:scheduler
+
+7. Dashboard: `cd dashboard && npm install && npm run dev`, then open
+   http://localhost:5173, sign up, and create a project + queue.
+8. **Start a worker, pointed at that queue.** Each worker process watches
+   exactly one queue, set via the `QUEUE_ID` environment variable — this is a
+   deliberate design choice (see `docs/design-decisions.md`), not a missing
+   feature. Get the queue's id one of two ways:
+   - From the dashboard's URL bar while viewing that queue
+     (`http://localhost:5173/queues/<this-part-is-the-id>`), or
+   - Directly from the database, which also shows every queue at once if
+     you've created more than one:
+ psql "$DATABASE_URL" -c "SELECT id, name FROM queues;"
+
+   Then start the worker:
+
+cd worker
+QUEUE_ID=<paste-queue-id> npm run dev
+
+
+   Submitted jobs will sit in `queued` status until a worker watching that
+   specific queue is running — this is expected, not a bug, and a good thing
+   to demo: submit a job with no worker running, show it staying `queued`,
+   then start the worker and watch it complete.
 
 ## Setup (fully Dockerized)
 
-```
 docker compose up -d --build postgres api scheduler dashboard
-```
+
 
 The `worker` service needs a real `QUEUE_ID` to watch, which only exists after
 you've created a queue through the API/dashboard — so bring the rest up first,
-create a project + queue from the dashboard (http://localhost:8080), copy its
-id, then:
+create a project + queue from the dashboard (http://localhost:8080), find the
+queue's id the same way as above, then:
 
-```
 QUEUE_ID=<queue id> docker compose up -d --build worker
-```
+
 
 ## Demoing the reliability features
 
@@ -101,39 +127,10 @@ Two tiers:
 
 To run everything including integration tests:
 
-```
 createdb job_scheduler_test
 psql job_scheduler_test -f db/migrations/001_init.sql
 TEST_DATABASE_URL=postgres://scheduler:scheduler@localhost:5432/job_scheduler_test npm test
-```
 
-## Extending later (bonus features)
-
-- `jobs.depends_on` is already in the schema, unused — enables workflow dependencies.
-- Swap the polling worker loop for a `LISTEN/NOTIFY` trigger to reduce latency.
-- Add Socket.io to the API server and dashboard for live updates instead of polling.
-- Add a `roles` column to `users` + a permission-check middleware for RBAC.
-
-
-## Running tests
-
-Two tiers:
-
-- **Unit tests** (`worker/tests/jobRepository.test.js`) — pure functions like backoff
-  math, no database needed. These always run.
-- **Integration tests** (`worker/tests/claim.integration.test.js`,
-  `api/tests/api.integration.test.js`) — run against a real Postgres to prove the
-  atomic claim query, `SKIP LOCKED` behavior under concurrency, and the full API
-  request/response cycle. They auto-skip if `TEST_DATABASE_URL` isn't set, so
-  `npm test` never fails just because Postgres isn't running.
-
-To run everything including integration tests:
-
-```
-createdb job_scheduler_test
-psql job_scheduler_test -f db/migrations/001_init.sql
-TEST_DATABASE_URL=postgres://scheduler:scheduler@localhost:5432/job_scheduler_test npm test
-```
 
 ## Extending later (bonus features)
 
