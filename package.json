@@ -1,0 +1,12 @@
+{
+  "name": "job-scheduler",
+  "private": true,
+  "workspaces": ["api", "worker", "scheduler"],
+  "scripts": {
+    "migrate": "psql \"$DATABASE_URL\" -f db/migrations/001_init.sql",
+    "dev:api": "npm run dev --workspace=api",
+    "dev:worker": "npm run dev --workspace=worker",
+    "dev:scheduler": "npm run dev --workspace=scheduler",
+    "test": "npm run test --workspace=api && npm run test --workspace=worker"
+  }
+}
