@@ -1,0 +1,301 @@
+openapi: 3.0.3
+info:
+  title: Distributed job scheduler API
+  version: "1.0.0"
+  description: >
+    REST API for managing projects, queues, jobs, workers, and the dead
+    letter queue. All endpoints except /auth/* require a Bearer JWT.
+servers:
+  - url: http://localhost:4000/api
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+    Project:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string, format: uuid }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+    Queue:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string }
+        priority: { type: integer }
+        concurrency_limit: { type: integer }
+        is_paused: { type: boolean }
+    Job:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        queue_id: { type: string, format: uuid }
+        type: { type: string, enum: [immediate, delayed, scheduled, recurring, batch] }
+        status: { type: string, enum: [queued, claimed, running, completed, failed, dead] }
+        payload: { type: object }
+        run_at: { type: string, format: date-time }
+        attempt_count: { type: integer }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/signup:
+    post:
+      security: []
+      summary: Create a user account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        '201': { description: Account created }
+        '400': { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '409': { description: Email already registered }
+
+  /auth/login:
+    post:
+      security: []
+      summary: Log in and receive a JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: JWT issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: object, properties: { token: { type: string } } }
+        '400': { description: Invalid credentials }
+
+  /projects:
+    get:
+      summary: List the caller's projects (paginated)
+      parameters:
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        '200': { description: Paginated list of projects }
+    post:
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: { name: { type: string } }
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Project' } }
+
+  /projects/{id}:
+    get:
+      summary: Get a project by id
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Project found }
+        '404': { description: Not found }
+    patch:
+      summary: Rename a project
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        '200': { description: Updated }
+    delete:
+      summary: Delete a project (cascades to its queues and jobs)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Deleted }
+
+  /projects/{projectId}/queues:
+    get:
+      summary: List queues in a project
+      parameters: [{ name: projectId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: List of queues }
+    post:
+      summary: Create a queue
+      parameters: [{ name: projectId, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                priority: { type: integer, default: 0 }
+                concurrencyLimit: { type: integer, default: 5 }
+                retryPolicyId: { type: string, nullable: true }
+      responses:
+        '201':
+          description: Queue created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Queue' } }
+
+  /queues/{id}:
+    patch:
+      summary: Update queue config (partial)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Updated }
+
+  /queues/{id}/pause:
+    post:
+      summary: Pause a queue (workers stop claiming from it)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Queue paused }
+
+  /queues/{id}/resume:
+    post:
+      summary: Resume a paused queue
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Queue resumed }
+
+  /queues/{id}/stats:
+    get:
+      summary: Job counts by status for this queue
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: 'Object mapping status -> count' }
+
+  /queues/{queueId}/jobs:
+    get:
+      summary: List jobs in a queue (paginated, filterable by status)
+      parameters:
+        - { name: queueId, in: path, required: true, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        '200': { description: Paginated list of jobs }
+    post:
+      summary: Submit a job (immediate, delayed, scheduled, recurring, or batch)
+      parameters: [{ name: queueId, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [immediate, delayed, scheduled, recurring, batch] }
+                payload: { type: object }
+                runAt: { type: string, format: date-time }
+                cronExpression: { type: string, description: Required when type=recurring }
+                idempotencyKey: { type: string }
+                items: { type: array, items: { type: object }, description: Required when type=batch }
+      responses:
+        '201':
+          description: Job (or scheduled entry, or array of jobs for batch) created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Job' } }
+        '400': { description: Validation error }
+
+  /jobs/{id}:
+    get:
+      summary: Get a job with its execution history and logs
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Job detail }
+        '404': { description: Not found }
+
+  /jobs/{id}/retry:
+    post:
+      summary: Manually requeue a failed or dead job
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Job requeued }
+        '404': { description: Job not found or not retryable }
+
+  /workers:
+    get:
+      summary: List all registered workers with their last heartbeat
+      responses:
+        '200': { description: List of workers }
+
+  /workers/{id}/jobs:
+    get:
+      summary: List jobs currently assigned to a worker
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: List of in-flight jobs }
+
+  /dlq:
+    get:
+      summary: List dead-lettered jobs (paginated, filterable by queue)
+      parameters:
+        - { name: queueId, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        '200': { description: Paginated list of dead letter entries }
+
+  /dlq/{id}/requeue:
+    post:
+      summary: Move a dead-lettered job back to queued, resetting attempt count
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Job requeued }
+        '404': { description: Not found }
+
+  /metrics/overview:
+    get:
+      summary: Job counts by status, worker counts by status, DLQ count
+      responses:
+        '200': { description: Overview metrics }
+
+  /metrics/throughput:
+    get:
+      summary: Completed jobs per minute over the last hour
+      responses:
+        '200': { description: Time series data }
