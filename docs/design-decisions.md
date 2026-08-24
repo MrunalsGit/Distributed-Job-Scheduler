@@ -138,6 +138,26 @@ manually requeue it.
   own projects directly) to keep the schema explainable; adding an
   `organizations` table between `users` and `projects` is a small, additive
   change if needed later.
+- **Organizations were deliberately not modeled as a separate table** — users
+  own projects directly instead. The assignment brief names Organizations in
+  its list of entities; this is a conscious simplification, not an
+  oversight: at the scale of one user managing their own projects, an
+  Organizations layer adds a join with no behavioral difference. Adding an
+  `organizations` table between `users` and `projects` (with a
+  `project.org_id` FK) is a small, additive migration if multi-tenant
+  ownership is ever needed.
+- **"Scheduled" is a table, not a job status.** The brief describes the job
+  lifecycle as `Queued → Scheduled → Claimed → Running → Completed`. In this
+  implementation, a delayed/cron/recurring job lives in `scheduled_jobs`
+  (with its own `next_run_at`) until the scheduler process promotes it into
+  a real row in `jobs` with `status = 'queued'` — so "scheduled" is a
+  *holding area* a job passes through before it ever becomes a `jobs` row,
+  rather than a value the `jobs.status` column takes. Immediate and batch
+  jobs skip this holding area entirely and go straight to `queued`. This
+  keeps the claim query's `status` check simple (workers only ever look at
+  `queued`/`claimed`/`running`/etc., never a `scheduled` state) at the cost
+  of the literal five-state chain not appearing in one column.
+
 
 ## 7. API design choices
 
